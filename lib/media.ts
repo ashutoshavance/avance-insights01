@@ -20,3 +20,13 @@ export function getStrapiMedia(url: string | null | undefined): string {
 export function getStrapiAlt(alt: string | null | undefined, fallback: string): string {
   return alt?.trim() || fallback
 }
+
+/**
+ * Build an Unsplash Source URL for a random image matching the query.
+ * Uses the public Source API which doesn't require an access key and is
+ * suitable as a fallback placeholder during development.
+ */
+export function getUnsplashUrl(query = 'research', width = 1200, height = 800): string {
+  const q = encodeURIComponent(String(query))
+  return `https://source.unsplash.com/random/${width}x${height}?${q}`
+}

@@ -1,13 +1,16 @@
-'use client'
+"use client"
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import Link from 'next/link'
 import { Calendar, Clock, Tag, Search, Filter, ArrowRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { apiFetchSafe } from '@/lib/api-client'
+import { getStrapiMedia } from '@/lib/strapi'
+import { getUnsplashUrl } from '@/lib/media'
 
-// Sample insights - in production, fetch from Strapi
-const insights = [
+// Fallback insights shown when Strapi is unreachable or empty
+const FALLBACK_INSIGHTS = [
   {
     id: 1,
     title: 'Consumer Trends in Digital Payment Adoption',
@@ -16,6 +19,8 @@ const insights = [
     date: '2024-01-15',
     readTime: '8 min read',
     slug: 'consumer-trends-digital-payment',
+    imageUrl: '',
+    imageAlt: '',
   },
   {
     id: 2,
@@ -25,6 +30,8 @@ const insights = [
     date: '2024-01-10',
     readTime: '12 min read',
     slug: 'impact-assessment-rural-education',
+    imageUrl: '',
+    imageAlt: '',
   },
   {
     id: 3,
@@ -34,33 +41,8 @@ const insights = [
     date: '2024-01-05',
     readTime: '6 min read',
     slug: 'brand-health-fmcg-2024',
-  },
-  {
-    id: 4,
-    title: 'Data Collection Best Practices Guide',
-    excerpt: 'Essential guidelines for ensuring data quality in field research across diverse geographies and demographics.',
-    category: 'Methodology',
-    date: '2024-01-01',
-    readTime: '10 min read',
-    slug: 'data-collection-best-practices',
-  },
-  {
-    id: 5,
-    title: 'E-commerce Consumer Behavior Study',
-    excerpt: 'Understanding how Indian consumers navigate online shopping platforms, from discovery to purchase decision.',
-    category: 'Market Research',
-    date: '2023-12-20',
-    readTime: '9 min read',
-    slug: 'ecommerce-consumer-behavior',
-  },
-  {
-    id: 6,
-    title: 'Healthcare Awareness in Tier-2 Cities',
-    excerpt: 'Exploring health literacy and healthcare-seeking behaviors in emerging urban markets across India.',
-    category: 'Social Research',
-    date: '2023-12-15',
-    readTime: '11 min read',
-    slug: 'healthcare-awareness-tier2',
+    imageUrl: '',
+    imageAlt: '',
   },
 ]
 
@@ -69,16 +51,59 @@ const categories = ['All', 'Market Research', 'Social Research', 'Brand Research
 export default function InsightsPage() {
   const [selectedCategory, setSelectedCategory] = useState('All')
   const [searchQuery, setSearchQuery] = useState('')
+  const [insights, setInsights] = useState(FALLBACK_INSIGHTS)
+
+  // Fetch case studies from Strapi and map to insights shape
+  useEffect(() => {
+    let isMounted = true
+
+    async function fetchCaseStudies() {
+      const res = await apiFetchSafe('/case-studies?populate=*') as any
+      if (!isMounted) return
+      try {
+        const data = res?.data
+        if (!data || !Array.isArray(data) || data.length === 0) return
+
+        const mapped = data.map((item: any, idx: number) => {
+          const img = item.featuredImage ?? item.featured_image ?? item.attributes?.featuredImage ?? item.attributes?.featured_image ?? null
+          const rawUrl = img?.url ?? img?.formats?.medium?.url ?? img?.formats?.thumbnail?.url ?? img?.formats?.small?.url ?? img?.url
+          const resolved = getStrapiMedia(rawUrl)
+          const imgUrl = resolved && resolved !== '' ? resolved : getUnsplashUrl(`${item.category ?? item.attributes?.category ?? 'research'},case-study`)
+          const imgAlt = img?.alternativeText ?? img?.altText ?? img?.alternative_text ?? ''
+
+          return {
+            id: item.id ?? (item.documentId ? item.documentId : Math.random()),
+            title: item.title ?? item.attributes?.title ?? 'Untitled',
+            excerpt: item.shortDescription ?? item.excerpt ?? item.attributes?.shortDescription ?? item.attributes?.excerpt ?? '',
+            category: item.category ?? item.attributes?.category ?? 'Case Study',
+            date: item.publishDate ?? item.createdAt ?? item.attributes?.publishDate ?? item.attributes?.createdAt ?? new Date().toISOString(),
+            readTime: item.readTime ?? '5 min read',
+            slug: item.slug ?? item.attributes?.slug ?? `case-${item.id}`,
+            imageUrl: imgUrl,
+            imageAlt: imgAlt,
+          }
+        })
+
+        if (mapped.length) setInsights(mapped)
+      } catch (err) {
+        // keep fallback
+      }
+    }
+
+    fetchCaseStudies()
+
+    return () => { isMounted = false }
+  }, [])
 
   const filteredInsights = insights.filter((insight) => {
     const matchesCategory = selectedCategory === 'All' || insight.category === selectedCategory
     const matchesSearch = insight.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      insight.excerpt.toLowerCase().includes(searchQuery.toLowerCase())
+      (insight.excerpt || '').toLowerCase().includes(searchQuery.toLowerCase())
     return matchesCategory && matchesSearch
   })
 
   return (
-    <div className="pt-20">
+    <>
       {/* Hero */}
       <section className="py-16 bg-gradient-to-br from-primary-50 via-white to-accent-50">
         <div className="container-custom">
@@ -155,13 +180,22 @@ export default function InsightsPage() {
                 >
                   <Link href={`/insights/${insight.slug}`}>
                     <div className="card card-hover h-full flex flex-col group">
-                      {/* Image placeholder */}
-                      <div className="aspect-[16/10] bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center">
-                        <div className="w-20 h-20 bg-white/80 rounded-full flex items-center justify-center">
-                          <span className="text-3xl font-bold text-primary-600">
-                            {insight.title.charAt(0)}
-                          </span>
-                        </div>
+                      {/* Image (uses Strapi featured image when available) */}
+                      <div className="aspect-[16/10] bg-gradient-to-br from-primary-100 to-accent-100 flex items-center justify-center overflow-hidden">
+                        {insight.imageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={insight.imageUrl}
+                            alt={insight.imageAlt || insight.title}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-20 h-20 bg-white/80 rounded-full flex items-center justify-center">
+                            <span className="text-3xl font-bold text-primary-600">
+                              {insight.title.charAt(0)}
+                            </span>
+                          </div>
+                        )}
                       </div>
 
                       {/* Content */}
@@ -246,6 +280,6 @@ export default function InsightsPage() {
           </div>
         </div>
       </section>
-    </div>
+    </>
   )
 }

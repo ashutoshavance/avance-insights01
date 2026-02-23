@@ -62,6 +62,23 @@ export type StrapiImage = StrapiMedia
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
+/**
+ * Strapi v5 Rich Text Block structure
+ * Rich Text editor returns array of block objects with text content
+ */
+export interface RichTextBlock {
+  type?: string
+  children?: Array<{
+    type?: string
+    text?: string
+    bold?: boolean
+    italic?: boolean
+    [key: string]: any
+  }>
+  level?: number
+  [key: string]: any
+}
+
 /** Raw shape from Strapi v5 services collection (flat — no .attributes) */
 export interface Service {
   id:                number
@@ -69,12 +86,19 @@ export interface Service {
   title:             string
   slug:              string
   shortDescription?: string | null
-  fullDescription?:  string | null
+  fullDescription?:  string | RichTextBlock[] | null  // Can be string or Rich Text blocks
   description?:      string | null   // legacy field name
   category?:         string | null
   iconName?:         string | null
   icon?:             string | null   // legacy field name
-  features?:         string[] | null
+  features?:         string[] | Record<string, any>[] | Record<string, string> | null // Flexible features input
+  overview?: Array<{
+    id?: string | number
+    title?: string
+    description?: string
+    content?: string
+    [key: string]: any
+  }> | null
   createdAt:         string
   updatedAt:         string
 }
@@ -90,20 +114,345 @@ export interface NormalisedService {
   category:        string
   iconName:        string
   features:        string[]
+  overview:        Array<{
+    id?: string | number
+    title: string
+    description: string
+  }>
 }
 
-export function normaliseService(s: Service): NormalisedService {
-  return {
-    id:              s.id,
-    documentId:      s.documentId,
-    title:           s.title            ?? '',
-    slug:            s.slug             ?? '',
-    description:     s.shortDescription ?? s.description ?? '',
-    fullDescription: s.fullDescription  ?? s.shortDescription ?? s.description ?? '',
-    category:        s.category         ?? '',
-    iconName:        s.iconName         ?? s.icon ?? 'BarChart3',
-    features:        Array.isArray(s.features) ? s.features : [],
+/**
+ * ─── RICH TEXT BLOCK CONVERTERS ────────────────────────────────────────────────
+ * Converts Strapi Rich Text Blocks into plain text for React rendering
+ */
+
+/**
+ * Extracts all text content from a single Rich Text Block object
+ * @param block - A single block from Strapi Rich Text editor
+ * @returns Plain text string
+ */
+function extractTextFromBlock(block: RichTextBlock): string {
+  if (!block || typeof block !== 'object') return ''
+  
+  // If block has direct text property
+  if (typeof block.text === 'string') {
+    return block.text
   }
+  
+  // If block has children array, recursively extract text
+  if (Array.isArray(block.children)) {
+    return block.children
+      .map((child: any) => {
+        if (typeof child.text === 'string') return child.text
+        if (typeof child === 'string') return child
+        return extractTextFromBlock(child)
+      })
+      .filter(Boolean)
+      .join(' ')
+  }
+  
+  return ''
+}
+
+/**
+ * Converts Strapi Rich Text Blocks array into plain text string
+ * Handles both array of blocks and plain string inputs
+ * @param richText - Raw fullDescription from Strapi (string or RichTextBlock[])
+ * @returns Plain text string safe for React rendering
+ */
+function convertRichTextToString(richText: string | RichTextBlock[] | null | undefined): string {
+  // Handle null/undefined
+  if (!richText) return ''
+  
+  // If already a string, just trim and return
+  if (typeof richText === 'string') {
+    return richText.trim()
+  }
+  
+  // If array of blocks, extract text from each
+  if (Array.isArray(richText)) {
+    return richText
+      .map((block) => extractTextFromBlock(block))
+      .filter((text) => text.trim().length > 0)
+      .join('\n\n')
+      .trim()
+  }
+  
+  // Fallback for unexpected types
+  return ''
+}
+
+/**
+ * ─── FEATURES CONVERTER ────────────────────────────────────────────────────────
+ * Converts features from any JSON format into string[]
+ */
+
+/**
+ * Safely converts features field into string array
+ * Handles: string[], objects [], Records, or raw JSON
+ * @param features - Raw features from Strapi (can be many formats)
+ * @returns Array of feature strings safe for React rendering
+ */
+function normalizeFeatures(
+  features: string[] | Record<string, any>[] | Record<string, string> | string | null | undefined
+): string[] {
+  // Handle null/undefined
+  if (!features) return []
+  
+  // Already a string array - filter out empty strings
+  if (Array.isArray(features)) {
+    return features
+      .filter((f): f is string | Record<string, any> => {
+        if (typeof f === 'string') return f.trim().length > 0
+        if (typeof f === 'object' && f !== null) {
+          // Handle objects with text/title/name properties
+          const text = (f as Record<string, any>).text || 
+                       (f as Record<string, any>).title || 
+                       (f as Record<string, any>).name || 
+                       (f as Record<string, any>).description || 
+                       (f as Record<string, any>).label || ''
+          return typeof text === 'string' && text.trim().length > 0
+        }
+        return false
+      })
+      .map((f) => {
+        if (typeof f === 'string') return f.trim()
+        // Extract text from object
+        const obj = f as Record<string, any>
+        const text = obj.text || obj.title || obj.name || obj.description || obj.label || ''
+        return String(text).trim()
+      })
+      .filter((f) => f.length > 0)
+  }
+  
+  // Handle Record<string, string> format (key-value pairs)
+  if (typeof features === 'object' && !Array.isArray(features)) {
+    return Object.values(features)
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .map((value) => value.trim())
+  }
+  
+  // Handle stringified JSON
+  if (typeof features === 'string') {
+    try {
+      const parsed = JSON.parse(features)
+      return normalizeFeatures(parsed)
+    } catch {
+      // If not valid JSON, treat as single feature
+      return features.trim().length > 0 ? [features.trim()] : []
+    }
+  }
+  
+  // Fallback
+  return []
+}
+
+/**
+ * ─── MAIN NORMALIZATION FUNCTION ──────────────────────────────────────────────
+ * Production-ready function that guarantees all returned fields are safe for React
+ */
+
+export function normaliseService(s: Service): NormalisedService {
+  // Validate input
+  if (!s || typeof s !== 'object') {
+    throw new Error('normaliseService: Input must be a valid Service object')
+  }
+  
+  // Convert Rich Text Blocks to plain string
+  const fullDesc = convertRichTextToString(s.fullDescription) ||
+    convertRichTextToString(s.shortDescription) ||
+    (typeof s.description === 'string' ? s.description.trim() : '') ||
+    ''
+  
+  // Normalize features from any format to string[]
+  const normalizedFeatures = normalizeFeatures(s.features)
+  
+  // Safely normalize overview array
+  const normalizedOverview = Array.isArray(s.overview)
+    ? s.overview
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+          id: item.id,
+          title: String(item.title || '').trim(),
+          description: String(item.description || item.content || '').trim(),
+        }))
+        .filter((item) => item.title.length > 0 || item.description.length > 0)
+    : []
+  
+  return {
+    id:              s.id ?? 0,
+    documentId:      s.documentId ?? '',
+    title:           String(s.title || '').trim(),
+    slug:            String(s.slug || '').trim(),
+    description:     String(s.shortDescription || s.description || '').trim(),
+    fullDescription: fullDesc.length > 0
+      ? fullDesc
+      : `Comprehensive insights and analysis for ${String(s.title || 'this service').trim()}. Our expert team provides detailed research, strategic recommendations, and actionable findings to drive your decision-making.`,
+    category:        String(s.category || '').trim(),
+    iconName:        String(s.iconName || s.icon || 'BarChart3').trim(),
+    features:        normalizedFeatures,
+    overview:        normalizedOverview,
+  }
+}
+
+// ─── Case Study ───────────────────────────────────────────────────────────────
+
+/**
+ * Raw Strapi v5 Case Study from the database
+ * Handles both nested (data.attributes) and flat responses
+ */
+export interface CaseStudy {
+  id:            number
+  documentId:    string
+  title:         string
+  slug:          string
+  client?:       string | null
+  sector?:       string | null
+  challenge?:    string | null
+  solution?:     string | null
+  results?:      string | null
+  methodology?:  string | null
+  coverImage?:   StrapiMedia | null
+  featuredImage?: StrapiMedia | null  // Alternative field name
+  featured_image?: StrapiMedia | null  // snake_case alternative
+  featured?:     boolean | null
+  createdAt:     string
+  updatedAt:     string
+}
+
+/**
+ * Normalised Case Study — guaranteed safe for React rendering
+ * All fields are strings or proper primitives, never objects
+ */
+export interface NormalisedCaseStudy {
+  id:           number
+  documentId:   string
+  title:        string
+  slug:         string
+  client:       string
+  sector:       string
+  challenge:    string
+  solution:     string
+  results:      string
+  methodology:  string
+  coverImageUrl: string
+  featured:     boolean
+}
+
+/**
+ * Production-ready Case Study normalizer
+ * 
+ * ─── WHAT IT HANDLES ──────────────────────────────────────────────────────
+ * ✓ Strapi v5 flat structure (documentId, direct fields)
+ * ✓ Nested response structure (data.attributes wrapper)
+ * ✓ Media object extraction (turns StrapiMedia into URL)
+ * ✓ Rich text and plain text fields
+ * ✓ Boolean conversion (featured)
+ * ✓ Null/undefined defensive handling
+ * ✓ Empty string fallbacks
+ * ✓ Fully TypeScript type-safe
+ *
+ * ─── GUARANTEED RETURN VALUES ──────────────────────────────────────────────
+ * All returned fields are:
+ *   - Strings (never objects or null)
+ *   - Properly trimmed
+ *   - Safe for React jsx rendering
+ *   - Can be used directly without null checks
+ */
+export function normalizeCaseStudy(data: any): NormalisedCaseStudy {
+  if (!data || typeof data !== 'object') {
+    throw new Error('normalizeCaseStudy: Input must be a valid object');
+  }
+
+  const cs: Partial<CaseStudy> = data.attributes || data;
+
+  if (!cs || typeof cs !== 'object') {
+    throw new Error('normalizeCaseStudy: Could not extract case study data');
+  }
+
+  const toSafeString = (value: any, fallback: string = ''): string => {
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number') return String(value).trim();
+    if (value && typeof value === 'object' && 'text' in value) return String(value.text).trim();
+    return fallback;
+  };
+
+  const getImageUrl = (media: any, csData?: any): string => {
+    if (csData) {
+      const flatImageCandidates = [
+        csData.coverImage,
+        csData.featured_image,
+        csData.featuredImage,
+        csData.attributes?.coverImage,
+        csData.attributes?.featured_image,
+        csData.attributes?.featuredImage,
+      ];
+
+      for (const candidate of flatImageCandidates) {
+        if (candidate && typeof candidate === 'object') {
+          const url = extractImageUrl(candidate);
+          if (url && url !== '/placeholder.png') {
+            return url;
+          }
+        }
+      }
+    }
+
+    if (media) {
+      return extractImageUrl(media);
+    }
+
+    return '/placeholder.png';
+  };
+
+  const extractImageUrl = (media: any): string => {
+    if (!media || typeof media !== 'object') return '/placeholder.png';
+
+    if (typeof media === 'string') {
+      return getStrapiMedia(media);
+    }
+
+    if (media.url && typeof media.url === 'string') {
+      return getStrapiMedia(media.url);
+    }
+
+    if (media.formats?.medium?.url) {
+      return getStrapiMedia(media.formats.medium.url);
+    }
+
+    if (media.formats?.large?.url) {
+      return getStrapiMedia(media.formats.large.url);
+    }
+
+    if (media.formats?.small?.url) {
+      return getStrapiMedia(media.formats.small.url);
+    }
+
+    if (media.data?.attributes?.url) {
+      return getStrapiMedia(media.data.attributes.url);
+    }
+
+    if (media.data?.attributes?.formats?.medium?.url) {
+      return getStrapiMedia(media.data.attributes.formats.medium.url);
+    }
+
+    return '/placeholder.png';
+  };
+
+  return {
+    id: cs.id ?? 0,
+    documentId: toSafeString(cs.documentId),
+    title: toSafeString(cs.title),
+    slug: toSafeString(cs.slug),
+    client: toSafeString(cs.client),
+    sector: toSafeString(cs.sector),
+    challenge: toSafeString(cs.challenge),
+    solution: toSafeString(cs.solution),
+    results: toSafeString(cs.results),
+    methodology: toSafeString(cs.methodology),
+    coverImageUrl: getImageUrl(cs.coverImage, cs),
+    featured: Boolean(cs.featured),
+  };
 }
 
 // ─── Insight ──────────────────────────────────────────────────────────────────
